@@ -13,6 +13,7 @@ import {
   ReasoningMessageEndEvent,
   ReasoningEndEvent,
   ReasoningEncryptedValueEvent,
+  MessagesSnapshotEvent,
   RunAgentInput,
 } from "@ag-ui/core";
 import { defaultApplyEvents } from "../default";
@@ -1343,5 +1344,136 @@ describe("defaultApplyEvents with reasoning events", () => {
     // Verify the activity message doesn't have encryptedValue set
     const activityMessage = initialState.messages.find((m) => m.id === "activity-1");
     expect((activityMessage as any)?.encryptedValue).toBeUndefined();
+  });
+});
+
+describe("MESSAGES_SNAPSHOT preserves reasoning messages", () => {
+  const createSnapAgent = (messages: Message[] = []) =>
+    ({
+      messages: messages.map((message) => ({ ...message })),
+      state: {},
+    }) as unknown as AbstractAgent;
+
+  const makeInput = (messages: Message[]): RunAgentInput => ({
+    messages,
+    state: {},
+    threadId: "thread-snap-reasoning",
+    runId: "run-snap-reasoning",
+    tools: [],
+    context: [],
+  });
+
+  it("preserves reasoning message between conversation messages", async () => {
+    const initial: Message[] = [
+      { id: "m1", role: "user", content: "hello" },
+      { id: "r1", role: "reasoning", content: "Thinking about response" },
+      { id: "m2", role: "assistant", content: "hi" },
+    ] as Message[];
+
+    const events$ = new Subject<BaseEvent>();
+    const agent = createSnapAgent(initial);
+    const result$ = defaultApplyEvents(makeInput(initial), events$, agent, []);
+    const updatesPromise = firstValueFrom(result$.pipe(toArray()));
+
+    events$.next({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        { id: "m1", role: "user", content: "hello" },
+        { id: "m2", role: "assistant", content: "hi" },
+      ],
+    } as MessagesSnapshotEvent);
+
+    events$.complete();
+    const updates = await updatesPromise;
+
+    expect(updates.length).toBe(1);
+    const msgs = updates[0]?.messages!;
+    expect(msgs.length).toBe(3);
+    expect(msgs.map((m) => m.id)).toEqual(["m1", "r1", "m2"]);
+    expect(msgs[1].role).toBe("reasoning");
+  });
+
+  it("keeps reasoning message ordering after its anchor", async () => {
+    const initial: Message[] = [
+      { id: "m1", role: "user", content: "q1" },
+      { id: "r1", role: "reasoning", content: "Let me think" },
+      { id: "m2", role: "assistant", content: "a1" },
+    ] as Message[];
+
+    const events$ = new Subject<BaseEvent>();
+    const agent = createSnapAgent(initial);
+    const result$ = defaultApplyEvents(makeInput(initial), events$, agent, []);
+    const updatesPromise = firstValueFrom(result$.pipe(toArray()));
+
+    events$.next({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        { id: "m1", role: "user", content: "q1" },
+        { id: "m2", role: "assistant", content: "a1" },
+      ],
+    } as MessagesSnapshotEvent);
+
+    events$.complete();
+    const updates = await updatesPromise;
+    const msgs = updates[0]?.messages!;
+
+    // Reasoning should be after m1 (its anchor), not appended at end
+    expect(msgs[0].id).toBe("m1");
+    expect(msgs[1].id).toBe("r1");
+    expect(msgs[2].id).toBe("m2");
+  });
+
+  it("preserves reasoning at start of messages (null anchor)", async () => {
+    const initial: Message[] = [
+      { id: "r0", role: "reasoning", content: "Initial thought" },
+      { id: "m1", role: "user", content: "hello" },
+    ] as Message[];
+
+    const events$ = new Subject<BaseEvent>();
+    const agent = createSnapAgent(initial);
+    const result$ = defaultApplyEvents(makeInput(initial), events$, agent, []);
+    const updatesPromise = firstValueFrom(result$.pipe(toArray()));
+
+    events$.next({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [{ id: "m1", role: "user", content: "hello" }],
+    } as MessagesSnapshotEvent);
+
+    events$.complete();
+    const updates = await updatesPromise;
+    const msgs = updates[0]?.messages!;
+
+    expect(msgs.length).toBe(2);
+    expect(msgs[0].id).toBe("r0");
+    expect(msgs[1].id).toBe("m1");
+  });
+
+  it("preserves multiple reasoning messages with different anchors", async () => {
+    const initial: Message[] = [
+      { id: "r-a", role: "reasoning", content: "thought a" },
+      { id: "m1", role: "user", content: "q" },
+      { id: "r-b", role: "reasoning", content: "thought b" },
+      { id: "m2", role: "assistant", content: "a" },
+      { id: "r-c", role: "reasoning", content: "thought c" },
+    ] as Message[];
+
+    const events$ = new Subject<BaseEvent>();
+    const agent = createSnapAgent(initial);
+    const result$ = defaultApplyEvents(makeInput(initial), events$, agent, []);
+    const updatesPromise = firstValueFrom(result$.pipe(toArray()));
+
+    events$.next({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        { id: "m1", role: "user", content: "q" },
+        { id: "m2", role: "assistant", content: "a" },
+      ],
+    } as MessagesSnapshotEvent);
+
+    events$.complete();
+    const updates = await updatesPromise;
+    const msgs = updates[0]?.messages!;
+
+    expect(msgs.map((m) => m.id)).toEqual(["r-a", "m1", "r-b", "m2", "r-c"]);
   });
 });
